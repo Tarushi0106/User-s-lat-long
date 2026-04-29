@@ -6,7 +6,14 @@ const cors     = require('cors');
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    'https://master.d2pv1qhyx4ve8v.amplifyapp.com',
+    'http://localhost:4000',
+    'http://localhost:3000',
+  ],
+  credentials: true,
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
