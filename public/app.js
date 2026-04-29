@@ -1,4 +1,6 @@
-const API = '';
+const API = window.location.hostname === 'localhost'
+  ? ''
+  : 'https://your-app.railway.app';  // replace with your Railway URL
 let currentRows = [];
 
 // ── Boot ───────────────────────────────────────────────────────────────────
