@@ -19,10 +19,7 @@
       <img src="logo2.jpeg" alt="Shaurrya Teleservices" class="header-logo" />
       <div class="header-right">
         <span class="header-date" id="headerDate"></span>
-        <button id="seedBtn" class="btn btn-outline">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
-          Sync Master Data
-        </button>
+        <span class="master-pill" id="headerMasterPill">Loading master…</span>
       </div>
     </div>
   </header>
@@ -38,6 +35,15 @@
 
     <!-- STAT CARDS -->
     <div class="cards">
+      <div class="card">
+        <div class="card-icon purple">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+        </div>
+        <div>
+          <div class="card-label">Master Sites Loaded</div>
+          <div class="card-value purple" id="statMasterSites">–</div>
+        </div>
+      </div>
       <div class="card">
         <div class="card-icon blue">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -70,7 +76,7 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </div>
         <div>
-          <div class="card-label">Work Not Done, Not Verified</div>
+          <div class="card-label">Not Verified</div>
           <div class="card-value red" id="statUnmatched">0</div>
         </div>
       </div>
@@ -79,17 +85,17 @@
     <!-- UPLOAD -->
     <section class="panel">
       <div class="panel-header">
-        <h2>Upload Daily Report</h2>
+        <h2>Upload Field Person's GPS Report</h2>
       </div>
-      <p class="info-text">Excel file must contain <strong>Lat</strong> and <strong>Long</strong> columns. Name, Site ID, and Date columns are auto-detected if present.</p>
+      <p class="info-text">Upload the field person's daily GPS tracker Excel file (.xlsx / .xls / .csv). The file must contain <strong>Lat</strong> and <strong>Long</strong> columns. Each row's GPS is matched against the master site coordinates — within 500 m = Verified.</p>
       <form id="uploadForm">
         <div class="form-row">
           <div class="field">
-            <label>Uploaded By</label>
-            <input type="text" id="uploadedBy" placeholder="Your name" />
+            <label>Person's Name</label>
+            <input type="text" id="uploadedBy" placeholder="Field person's name (optional)" />
           </div>
           <div class="field field-grow">
-            <label>Select File (.xlsx / .xls / .csv)</label>
+            <label>GPS Tracker File (.xlsx / .xls / .csv)</label>
             <label class="file-pick" id="fileDrop">
               <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" required />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
@@ -122,12 +128,12 @@
       <div class="filter-row">
         <div class="search-box">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input type="text" id="searchInput" placeholder="Search name, site ID…" />
+          <input type="text" id="searchInput" placeholder="Search name, site ID, district…" />
         </div>
         <select id="statusFilter">
           <option value="">All Statuses</option>
           <option value="Work Done - Verified">Work Done, Verified</option>
-          <option value="Not Matched">Work Not Done, Not Verified</option>
+          <option value="Not Matched">Not Verified</option>
         </select>
         <span class="row-count" id="resultCount"></span>
       </div>
@@ -138,10 +144,12 @@
               <th>#</th>
               <th>Person</th>
               <th>Site ID</th>
-              <th>Site Name</th>
+              <th>Site Name (Master)</th>
               <th>District</th>
+              <th>Circle</th>
+              <th>Person GPS → Master GPS</th>
               <th>Distance</th>
-              <th>Time of Visit</th>
+              <th>Time</th>
               <th>Status</th>
             </tr>
           </thead>
