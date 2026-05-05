@@ -87,7 +87,7 @@
       <div class="panel-header">
         <h2>Upload Field Person's GPS Report</h2>
       </div>
-      <p class="info-text">Upload the field person's daily GPS tracker Excel file (.xlsx / .xls / .csv). The file must contain <strong>Lat</strong> and <strong>Long</strong> columns. Each row's GPS is matched against the master site coordinates — within 500 m = Verified.</p>
+      <p class="info-text">Upload the field person's daily GPS tracker file (.xlsx / .xls / .csv). Must contain <strong>Lat</strong> and <strong>Long</strong> columns. Each row's GPS is compared against every master site — if the nearest site is within <strong>500 m</strong>, that row is marked Verified.</p>
       <form id="uploadForm">
         <div class="form-row">
           <div class="field">
@@ -134,7 +134,6 @@
           <option value="">All Statuses</option>
           <option value="Work Done - Verified">Work Done, Verified</option>
           <option value="Not Matched">Not Verified</option>
-          <option value="Site Not in Master">Site Not in Master</option>
         </select>
         <span class="row-count" id="resultCount"></span>
       </div>

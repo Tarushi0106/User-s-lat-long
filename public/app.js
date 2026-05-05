@@ -137,17 +137,6 @@ function parseSiteLatLong(wb) {
   return map;
 }
 
-// ── Look up a Site ID in both masters ─────────────────────────────────────
-// Checks PAN India first, then Site Lat/Long.
-// Returns { site, source } or null.
-function lookupSiteById(rawId) {
-  if (!rawId) return null;
-  const key = rawId.trim().toUpperCase();
-  if (panIdMap.has(key)) return { site: panIdMap.get(key), source: 'PAN India' };
-  if (llIdMap.has(key))  return { site: llIdMap.get(key),  source: 'Site Lat/Long' };
-  return null;
-}
-
 // ── Build merged array for stats ───────────────────────────────────────────
 function buildMergedArray() {
   const merged = new Map();
@@ -306,15 +295,11 @@ document.getElementById('fileInput').addEventListener('change', function () {
 });
 
 // ── Upload & Match ─────────────────────────────────────────────────────────
-//
-//  STEP 1 — Get Site ID from the uploaded row.
-//  STEP 2 — Cross-check that Site ID against PAN India master first,
-//            then Site Lat/Long master (whichever matches first wins).
-//  STEP 3 — Compare the person's Lat/Long vs the master site's Lat/Long.
-//           ≤ 500 m  →  Work Done, Verified
-//           > 500 m  →  Not Verified (person was too far from the site)
-//           Site ID not found in either master  →  Site Not in Master
-//
+// For each row in the uploaded file:
+//   1. Get the person's Lat/Long.
+//   2. Find the nearest master site (from PAN India + Site Lat/Long) by GPS.
+//   3. If nearest site is ≤ 500 m → Work Done, Verified.
+//      If nearest site is > 500 m → Not Verified.
 document.getElementById('uploadForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('fileInput').files[0];
@@ -344,7 +329,6 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const headers = rows[0].map(h => String(h || '').trim().toLowerCase());
     const ci = makeCi(headers);
 
-    const colSiteId  = ci('site id', 'stpl site id', 'sts site id', 'site_id', 'siteid');
     const colLat     = ci('lat', 'latitude');
     const colLng     = ci('lng', 'long', 'longitude');
     const colTime    = ci('time (gmt', 'time', 'timestamp', 'date');
@@ -353,8 +337,6 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
 
     if (colLat === -1 || colLng === -1)
       throw new Error('Lat / Long columns not found in the uploaded file');
-    if (colSiteId === -1)
-      throw new Error('Site ID column not found in the uploaded file. The file must have a Site ID column (e.g. "Site ID", "STPL Site ID", "STS Site ID")');
 
     // Determine person name
     let personName = document.getElementById('uploadedBy').value.trim() || '';
@@ -371,26 +353,18 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     }
     if (!personName) personName = 'Unknown';
 
-    const TOLERANCE    = 500; // metres
-    const resultRows   = [];
+    const TOLERANCE  = 500; // metres
+    const resultRows = [];
     let matchedCount   = 0;
     let unmatchedCount = 0;
-    let notFoundCount  = 0;
     let skippedCount   = 0;
     let rowNumber      = 0;
 
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
 
-      // ── STEP 1: Get Site ID and Person GPS from this row ───────────────
-      const rawSiteId = String(r[colSiteId] || '').trim();
-      const userLat   = parseFloat(r[colLat]);
-      const userLng   = parseFloat(r[colLng]);
-
-      if (!rawSiteId && (!userLat || !userLng || isNaN(userLat) || isNaN(userLng))) {
-        skippedCount++;
-        continue;
-      }
+      const userLat = parseFloat(r[colLat]);
+      const userLng = parseFloat(r[colLng]);
       if (!userLat || !userLng || isNaN(userLat) || isNaN(userLng)) {
         skippedCount++;
         continue;
@@ -399,62 +373,19 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       const timeOfRow = colTime !== -1 ? String(r[colTime] || '') : '';
       rowNumber++;
 
-      // ── STEP 2: Cross-check Site ID against PAN India, then Site Lat/Long
-      const found = lookupSiteById(rawSiteId);
+      // Find the nearest master site by GPS
+      let nearestSite = null;
+      let nearestDist = Infinity;
+      const degTol = TOLERANCE / 111000;
 
-      if (!found) {
-        // Site ID not present in either master file
-        notFoundCount++;
-        unmatchedCount++;
-        resultRows.push({
-          rowNumber,
-          personName,
-          timeOfVisit:     timeOfRow,
-          userSiteId:      rawSiteId || '–',
-          matchedSiteId:   rawSiteId || '–',
-          matchedSiteName: '–',
-          district:        '–',
-          circle:          '–',
-          masterSource:    '–',
-          userLat, userLng,
-          masterLat:       null,
-          masterLng:       null,
-          distanceMeters:  null,
-          matched:         false,
-          status:          'Site Not in Master',
-        });
-        continue;
+      for (const site of masterSites) {
+        if (Math.abs(userLat - site.lat) > degTol) continue;
+        if (Math.abs(userLng - site.lng) > degTol) continue;
+        const d = haversineMeters(userLat, userLng, site.lat, site.lng);
+        if (d < nearestDist) { nearestDist = d; nearestSite = site; }
       }
 
-      const { site, source: masterSource } = found;
-
-      // ── STEP 3: Compare person's Lat/Long vs master site's Lat/Long ────
-      if (!site.lat || !site.lng) {
-        // Site found in master but has no coordinates — cannot verify
-        unmatchedCount++;
-        resultRows.push({
-          rowNumber,
-          personName,
-          timeOfVisit:     timeOfRow,
-          userSiteId:      rawSiteId,
-          matchedSiteId:   site.stsId,
-          matchedSiteName: site.name,
-          district:        site.dist,
-          circle:          site.circle,
-          masterSource,
-          userLat, userLng,
-          masterLat:       null,
-          masterLng:       null,
-          distanceMeters:  null,
-          matched:         false,
-          status:          'No Coords in Master',
-        });
-        continue;
-      }
-
-      const dist    = haversineMeters(userLat, userLng, site.lat, site.lng);
-      const matched = dist <= TOLERANCE;
-
+      const matched = nearestSite !== null && nearestDist <= TOLERANCE;
       if (matched) matchedCount++;
       else         unmatchedCount++;
 
@@ -462,23 +393,22 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
         rowNumber,
         personName,
         timeOfVisit:     timeOfRow,
-        userSiteId:      rawSiteId,
-        matchedSiteId:   site.stsId,
-        matchedSiteName: site.name,
-        district:        site.dist,
-        circle:          site.circle,
-        masterSource,
         userLat, userLng,
-        masterLat:       site.lat,
-        masterLng:       site.lng,
-        distanceMeters:  Math.round(dist),
+        matchedSiteId:   nearestSite ? nearestSite.stsId  : '–',
+        matchedSiteName: nearestSite ? nearestSite.name   : '–',
+        district:        nearestSite ? nearestSite.dist   : '–',
+        circle:          nearestSite ? nearestSite.circle : '–',
+        masterSource:    nearestSite ? nearestSite.source : '–',
+        masterLat:       nearestSite ? nearestSite.lat    : null,
+        masterLng:       nearestSite ? nearestSite.lng    : null,
+        distanceMeters:  nearestSite ? Math.round(nearestDist) : null,
         matched,
-        status:          matched ? 'Work Done - Verified' : 'Not Matched',
+        status: matched ? 'Work Done - Verified' : 'Not Matched',
       });
     }
 
     if (!rowNumber && skippedCount > 0)
-      throw new Error('No valid rows found — all rows had blank Site ID or GPS coordinates');
+      throw new Error('No valid GPS rows found — all rows had 0,0 or blank coordinates');
     if (!rowNumber)
       throw new Error('No data rows found in the uploaded file');
 
@@ -499,8 +429,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     loadStats();
 
     let summary = `Done — ${rowNumber} rows · ${matchedCount} Verified · ${unmatchedCount} Not Verified`;
-    if (notFoundCount)  summary += ` · ${notFoundCount} Site IDs not in master`;
-    if (skippedCount)   summary += ` · ${skippedCount} rows skipped (no GPS)`;
+    if (skippedCount) summary += ` · ${skippedCount} rows skipped (no GPS)`;
     msgEl.textContent = summary;
     msgEl.className   = 'success';
     viewReport(report.id);
