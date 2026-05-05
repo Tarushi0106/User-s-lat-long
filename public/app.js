@@ -1,6 +1,9 @@
 /* ── All logic runs in the browser. No backend server required. ── */
 
-let masterSites = [];   // merged from PAN India + Site Lat/Long
+// Separate maps so we can check each master independently
+let panIdMap  = new Map();   // Site ID → site object  (PAN India Dashboard)
+let llIdMap   = new Map();   // Site ID → site object  (Site Lat/Long)
+let masterSites = [];        // merged array (for stats / header count)
 let currentRows = [];
 
 // ── Boot ───────────────────────────────────────────────────────────────────
@@ -44,10 +47,10 @@ function makeCi(headers) {
 }
 
 // ── Parse PAN India Dashboard "Site master" sheet ──────────────────────────
-// Rows 0–1 are dept/sub-dept labels; row 2 has actual column names; data from row 3.
-function parsePanIndiaMaster(ws) {
+// Rows 0–1 are dept labels; row 2 = actual headers; data from row 3.
+function parsePanIndia(ws) {
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-  if (rows.length < 4) return {};
+  if (rows.length < 4) return new Map();
 
   const headers = rows[2].map(h => String(h || '').trim().toLowerCase().replace(/\r?\n/g, ' '));
   const ci = makeCi(headers);
@@ -59,41 +62,38 @@ function parsePanIndiaMaster(ws) {
   const iPers = ci('site acquisition person name');
   const iLat  = ci('latitude');
   const iLng  = ci('longitude');
-  const iStat = ci('tower status');
 
-  const map = {};
+  const map = new Map();
   for (let i = 3; i < rows.length; i++) {
     const r  = rows[i];
     const id = String(r[iId] || '').trim();
     if (!id) continue;
     const lat = parseFloat(r[iLat]);
     const lng = parseFloat(r[iLng]);
-    map[id] = {
+    map.set(id.toUpperCase(), {
       stsId:  id,
       name:   String(r[iName] || '').trim(),
       circle: String(r[iCirc] || '').trim(),
       dist:   String(r[iDist] || '').trim(),
       person: String(r[iPers] || '').trim(),
-      status: String(r[iStat] || '').trim(),
       lat:    (!isNaN(lat) && lat) ? lat : null,
       lng:    (!isNaN(lng) && lng) ? lng : null,
-    };
+      source: 'PAN India',
+    });
   }
   return map;
 }
 
 // ── Parse Site Lat/Long file ───────────────────────────────────────────────
-// Tries sheet "DPR" first, then "Site master", then first sheet.
+// Tries sheet "DPR" → "Site master" → first sheet.
 function parseSiteLatLong(wb) {
-  const sheetPriority = ['DPR', 'Site master', wb.SheetNames[0]];
+  const names = ['DPR', 'Site master', wb.SheetNames[0]];
   let ws = null;
-  for (const name of sheetPriority) {
-    if (wb.Sheets[name]) { ws = wb.Sheets[name]; break; }
-  }
-  if (!ws) return {};
+  for (const n of names) { if (wb.Sheets[n]) { ws = wb.Sheets[n]; break; } }
+  if (!ws) return new Map();
 
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-  if (rows.length < 2) return {};
+  if (rows.length < 2) return new Map();
 
   const headers = rows[0].map(h => String(h || '').trim().toLowerCase().replace(/\r?\n/g, ' '));
   const ci = makeCi(headers);
@@ -105,94 +105,88 @@ function parseSiteLatLong(wb) {
   const iPers = ci('site acquisition person name');
   const iLat  = ci('lat', 'latitude');
   const iLng  = ci('long', 'longitude');
-  const iStat = ci('updated status', 'tower status');
 
-  const map = {};
+  const map = new Map();
   for (let i = 1; i < rows.length; i++) {
     const r   = rows[i];
     const id  = String(r[iId] || '').trim();
     const lat = parseFloat(r[iLat]);
     const lng = parseFloat(r[iLng]);
     if (!id || isNaN(lat) || isNaN(lng) || !lat || !lng) continue;
-    map[id] = {
+    map.set(id.toUpperCase(), {
       stsId:  id,
       name:   String(r[iName] || '').trim(),
       circle: String(r[iCirc] || '').trim(),
       dist:   String(r[iDist] || '').trim(),
       person: String(r[iPers] || '').trim(),
-      status: String(r[iStat] || '').trim(),
       lat, lng,
-    };
+      source: 'Site Lat/Long',
+    });
   }
   return map;
 }
 
-// ── Merge both maps ────────────────────────────────────────────────────────
-// Site Lat/Long coordinates override PAN India coordinates when both have the same ID.
-// All sites from both files are included. Only sites with valid GPS are kept.
-function mergeMasters(panMap, llMap) {
-  const merged = { ...panMap };
+// ── Look up a Site ID in both masters ─────────────────────────────────────
+// Checks PAN India first, then Site Lat/Long.
+// Returns { site, source } or null.
+function lookupSiteById(rawId) {
+  if (!rawId) return null;
+  const key = rawId.trim().toUpperCase();
+  if (panIdMap.has(key)) return { site: panIdMap.get(key), source: 'PAN India' };
+  if (llIdMap.has(key))  return { site: llIdMap.get(key),  source: 'Site Lat/Long' };
+  return null;
+}
 
-  for (const [id, site] of Object.entries(llMap)) {
-    if (merged[id]) {
-      merged[id].lat = site.lat;
-      merged[id].lng = site.lng;
-      if (!merged[id].name   && site.name)   merged[id].name   = site.name;
-      if (!merged[id].circle && site.circle) merged[id].circle = site.circle;
-      if (!merged[id].dist   && site.dist)   merged[id].dist   = site.dist;
-      if (!merged[id].person && site.person) merged[id].person = site.person;
+// ── Build merged array for stats ───────────────────────────────────────────
+function buildMergedArray() {
+  const merged = new Map();
+  for (const [k, v] of panIdMap)  merged.set(k, v);
+  for (const [k, v] of llIdMap) {
+    if (merged.has(k)) {
+      // Site Lat/Long has authoritative coordinates — override
+      const s = { ...merged.get(k), lat: v.lat, lng: v.lng };
+      merged.set(k, s);
     } else {
-      merged[id] = { ...site };
+      merged.set(k, v);
     }
   }
-
-  return Object.values(merged).filter(s => s.lat && s.lng && !isNaN(s.lat) && !isNaN(s.lng));
+  return [...merged.values()].filter(s => s.lat && s.lng);
 }
 
-// ── Build fast lookup index ────────────────────────────────────────────────
-function buildMasterIndex() {
-  const byId = new Map();
-  for (const site of masterSites) {
-    if (site.stsId) byId.set(site.stsId.trim().toUpperCase(), site);
-  }
-  return { byId, list: masterSites };
-}
-
-// ── Update UI master status ────────────────────────────────────────────────
+// ── Update header pill ─────────────────────────────────────────────────────
 function updateMasterStatus() {
-  const pill     = document.getElementById('headerMasterPill');
-  const statEl   = document.getElementById('statMasterSites');
-  const bannerEl = document.getElementById('masterBanner');
+  const pill   = document.getElementById('headerMasterPill');
+  const statEl = document.getElementById('statMasterSites');
 
-  statEl.textContent = masterSites.length;
+  statEl.textContent = masterSites.length || '–';
 
   if (masterSites.length) {
     pill.textContent = `✔ ${masterSites.length} Sites Loaded`;
     pill.className   = 'master-pill loaded';
-    if (bannerEl) bannerEl.style.display = 'none';
   } else {
     pill.textContent = '⚠ Master Loading…';
     pill.className   = 'master-pill none';
-    if (bannerEl) bannerEl.style.display = '';
   }
 }
 
 // ── Auto-load both master files on startup ─────────────────────────────────
 async function autoLoadMasters() {
-  // Try cache first for instant startup
-  const cached = localStorage.getItem('masterSites');
+  // Serve from cache instantly while fresh copy loads in background
+  const cached = localStorage.getItem('masterCache');
   if (cached) {
     try {
-      masterSites = JSON.parse(cached);
+      const { pan, ll } = JSON.parse(cached);
+      panIdMap     = new Map(pan);
+      llIdMap      = new Map(ll);
+      masterSites  = buildMergedArray();
       updateMasterStatus();
       loadStats();
-    } catch (_) { /* ignore bad cache */ }
+    } catch (_) { /* bad cache, will be overwritten */ }
   }
 
-  // Always re-fetch fresh copies in the background
   try {
     const [panBuf, llBuf] = await Promise.all([
-      fetch('pan-india-master.xlsb').then(r => { if (!r.ok) throw new Error('pan-india-master.xlsb not found'); return r.arrayBuffer(); }),
+      fetch('pan-india-master.xlsb').then(r  => { if (!r.ok) throw new Error('pan-india-master.xlsb not found');   return r.arrayBuffer(); }),
       fetch('site-latlong-master.xlsx').then(r => { if (!r.ok) throw new Error('site-latlong-master.xlsx not found'); return r.arrayBuffer(); }),
     ]);
 
@@ -202,22 +196,26 @@ async function autoLoadMasters() {
     const panSheet = panWb.Sheets['Site master'];
     if (!panSheet) throw new Error('PAN India Dashboard: "Site master" sheet not found');
 
-    const panMap = parsePanIndiaMaster(panSheet);
-    const llMap  = parseSiteLatLong(llWb);
+    panIdMap    = parsePanIndia(panSheet);
+    llIdMap     = parseSiteLatLong(llWb);
+    masterSites = buildMergedArray();
 
-    masterSites = mergeMasters(panMap, llMap);
-    localStorage.setItem('masterSites', JSON.stringify(masterSites));
+    // Cache serialised maps for next load
+    localStorage.setItem('masterCache', JSON.stringify({
+      pan: [...panIdMap.entries()],
+      ll:  [...llIdMap.entries()],
+    }));
 
     updateMasterStatus();
     loadStats();
-    toast(`✔ Master loaded — ${masterSites.length} sites ready`);
+    toast(`✔ Master ready — ${panIdMap.size} PAN India · ${llIdMap.size} Site Lat/Long`);
   } catch (err) {
     console.error('Master load error:', err);
     if (!masterSites.length) {
       const pill = document.getElementById('headerMasterPill');
       pill.textContent = '✘ Master Load Failed';
       pill.className   = 'master-pill none';
-      toast('⚠ Could not load master files: ' + err.message, 6000);
+      toast('⚠ ' + err.message, 6000);
     }
   }
 }
@@ -227,7 +225,7 @@ function loadStats() {
   const reports        = getReports();
   const totalMatched   = reports.reduce((s, r) => s + r.matchedCount,   0);
   const totalUnmatched = reports.reduce((s, r) => s + r.unmatchedCount, 0);
-  document.getElementById('statMasterSites').textContent = masterSites.length;
+  document.getElementById('statMasterSites').textContent = masterSites.length || '–';
   document.getElementById('statUploads').textContent     = reports.length;
   document.getElementById('statRows').textContent        = totalMatched + totalUnmatched;
   document.getElementById('statMatched').textContent     = totalMatched;
@@ -256,10 +254,10 @@ function renderRecentReports(reports) {
     <div class="report-list-item">
       <div onclick="viewReport('${r.id}')" style="flex:1;cursor:pointer;">
         <div class="report-name">${esc(r.fileName)}</div>
-        <div class="report-meta">By ${esc(r.uploadedBy)} &nbsp;·&nbsp; ${r.createdAt} &nbsp;·&nbsp; ${r.totalRows} rows processed</div>
+        <div class="report-meta">By ${esc(r.uploadedBy)} &nbsp;·&nbsp; ${r.createdAt} &nbsp;·&nbsp; ${r.totalRows} rows</div>
       </div>
       <div class="report-badges">
-        <span class="badge badge-green">✔ ${r.matchedCount} Work Done, Verified</span>
+        <span class="badge badge-green">✔ ${r.matchedCount} Verified</span>
         <span class="badge badge-red">✘ ${r.unmatchedCount} Not Verified</span>
       </div>
       <button class="btn-delete" onclick="deleteReport(event,'${r.id}')" title="Delete">
@@ -297,9 +295,15 @@ document.getElementById('fileInput').addEventListener('change', function () {
 });
 
 // ── Upload & Match ─────────────────────────────────────────────────────────
-// Each row in the user's file = one GPS ping by that person.
-// Look up the site (by Site ID then by nearest GPS) in the merged master.
-// Compare the person's GPS against the master site GPS — ≤ 500 m = Verified.
+//
+//  STEP 1 — Get Site ID from the uploaded row.
+//  STEP 2 — Cross-check that Site ID against PAN India master first,
+//            then Site Lat/Long master (whichever matches first wins).
+//  STEP 3 — Compare the person's Lat/Long vs the master site's Lat/Long.
+//           ≤ 500 m  →  Work Done, Verified
+//           > 500 m  →  Not Verified (person was too far from the site)
+//           Site ID not found in either master  →  Site Not in Master
+//
 document.getElementById('uploadForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('fileInput').files[0];
@@ -313,10 +317,10 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
 
   const btn   = document.getElementById('uploadBtn');
   const msgEl = document.getElementById('uploadMsg');
-  btn.disabled = true;
+  btn.disabled    = true;
   btn.textContent = 'Processing…';
   msgEl.textContent = '';
-  msgEl.className = '';
+  msgEl.className   = '';
 
   try {
     const buf  = await file.arrayBuffer();
@@ -329,15 +333,17 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const headers = rows[0].map(h => String(h || '').trim().toLowerCase());
     const ci = makeCi(headers);
 
+    const colSiteId  = ci('site id', 'stpl site id', 'sts site id', 'site_id', 'siteid');
     const colLat     = ci('lat', 'latitude');
     const colLng     = ci('lng', 'long', 'longitude');
-    const colSiteId  = ci('site id', 'stpl site id', 'sts site id', 'site_id', 'siteid');
-    const colSiteNm  = ci('site name', 'sitename', 'site_name');
-    const colTracker = ci('tracker_id', 'tracker', 'device');
     const colTime    = ci('time (gmt', 'time', 'timestamp', 'date');
+    const colTracker = ci('tracker_id', 'tracker', 'device');
     const colPerson  = ci('person', 'name', 'employee', 'user', 'field');
 
-    if (colLat === -1 || colLng === -1) throw new Error('Lat/Lng columns not found in the uploaded file');
+    if (colLat === -1 || colLng === -1)
+      throw new Error('Lat / Long columns not found in the uploaded file');
+    if (colSiteId === -1)
+      throw new Error('Site ID column not found in the uploaded file. The file must have a Site ID column (e.g. "Site ID", "STPL Site ID", "STS Site ID")');
 
     // Determine person name
     let personName = document.getElementById('uploadedBy').value.trim() || '';
@@ -354,72 +360,88 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     }
     if (!personName) personName = 'Unknown';
 
-    const { byId, list: masterList } = buildMasterIndex();
-    const TOLERANCE = 500; // metres
-
+    const TOLERANCE    = 500; // metres
     const resultRows   = [];
     let matchedCount   = 0;
     let unmatchedCount = 0;
+    let notFoundCount  = 0;
     let skippedCount   = 0;
     let rowNumber      = 0;
 
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
 
-      // Person's actual GPS for this row
-      const userLat = parseFloat(r[colLat]);
-      const userLng = parseFloat(r[colLng]);
+      // ── STEP 1: Get Site ID and Person GPS from this row ───────────────
+      const rawSiteId = String(r[colSiteId] || '').trim();
+      const userLat   = parseFloat(r[colLat]);
+      const userLng   = parseFloat(r[colLng]);
+
+      if (!rawSiteId && (!userLat || !userLng || isNaN(userLat) || isNaN(userLng))) {
+        skippedCount++;
+        continue;
+      }
       if (!userLat || !userLng || isNaN(userLat) || isNaN(userLng)) {
         skippedCount++;
         continue;
       }
 
-      const rawSiteId = colSiteId !== -1 ? String(r[colSiteId] || '').trim() : '';
-      const rawSiteNm = colSiteNm !== -1 ? String(r[colSiteNm] || '').trim() : '';
-      const timeOfRow = colTime   !== -1 ? String(r[colTime]   || '') : '';
-
-      // Step 1: Look up site by Site ID in master
-      let masterSite   = rawSiteId ? byId.get(rawSiteId.toUpperCase()) : null;
-      let lookupMethod = 'Site ID';
-
-      // Step 2: No ID match — find nearest master site by GPS proximity
-      if (!masterSite) {
-        lookupMethod = 'GPS';
-        let bestDist = Infinity;
-        const degTol = TOLERANCE / 111000;
-        for (const site of masterList) {
-          if (Math.abs(userLat - site.lat) > degTol) continue;
-          if (Math.abs(userLng - site.lng) > degTol) continue;
-          const d = haversineMeters(userLat, userLng, site.lat, site.lng);
-          if (d < bestDist) { bestDist = d; masterSite = site; }
-        }
-      }
-
+      const timeOfRow = colTime !== -1 ? String(r[colTime] || '') : '';
       rowNumber++;
 
-      if (!masterSite) {
-        // Location not found in either master file
+      // ── STEP 2: Cross-check Site ID against PAN India, then Site Lat/Long
+      const found = lookupSiteById(rawSiteId);
+
+      if (!found) {
+        // Site ID not present in either master file
+        notFoundCount++;
         unmatchedCount++;
         resultRows.push({
           rowNumber,
           personName,
           timeOfVisit:     timeOfRow,
-          userLat, userLng,
-          userSiteId:      rawSiteId,
-          userSiteName:    rawSiteNm,
+          userSiteId:      rawSiteId || '–',
           matchedSiteId:   rawSiteId || '–',
-          matchedSiteName: 'Not Found in Master',
-          district: '–', circle: '–',
-          masterLat: null, masterLng: null,
-          distanceMeters: null,
-          matched: false, lookupMethod: '–',
-          status: 'Not Matched',
+          matchedSiteName: '–',
+          district:        '–',
+          circle:          '–',
+          masterSource:    '–',
+          userLat, userLng,
+          masterLat:       null,
+          masterLng:       null,
+          distanceMeters:  null,
+          matched:         false,
+          status:          'Site Not in Master',
         });
         continue;
       }
 
-      // Step 3: Compare person's GPS vs master site GPS
-      const dist    = haversineMeters(userLat, userLng, masterSite.lat, masterSite.lng);
+      const { site, source: masterSource } = found;
+
+      // ── STEP 3: Compare person's Lat/Long vs master site's Lat/Long ────
+      if (!site.lat || !site.lng) {
+        // Site found in master but has no coordinates — cannot verify
+        unmatchedCount++;
+        resultRows.push({
+          rowNumber,
+          personName,
+          timeOfVisit:     timeOfRow,
+          userSiteId:      rawSiteId,
+          matchedSiteId:   site.stsId,
+          matchedSiteName: site.name,
+          district:        site.dist,
+          circle:          site.circle,
+          masterSource,
+          userLat, userLng,
+          masterLat:       null,
+          masterLng:       null,
+          distanceMeters:  null,
+          matched:         false,
+          status:          'No Coords in Master',
+        });
+        continue;
+      }
+
+      const dist    = haversineMeters(userLat, userLng, site.lat, site.lng);
       const matched = dist <= TOLERANCE;
 
       if (matched) matchedCount++;
@@ -429,23 +451,23 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
         rowNumber,
         personName,
         timeOfVisit:     timeOfRow,
-        userLat, userLng,
         userSiteId:      rawSiteId,
-        userSiteName:    rawSiteNm,
-        matchedSiteId:   masterSite.stsId,
-        matchedSiteName: masterSite.name,
-        district:        masterSite.dist,
-        circle:          masterSite.circle,
-        masterLat:       masterSite.lat,
-        masterLng:       masterSite.lng,
+        matchedSiteId:   site.stsId,
+        matchedSiteName: site.name,
+        district:        site.dist,
+        circle:          site.circle,
+        masterSource,
+        userLat, userLng,
+        masterLat:       site.lat,
+        masterLng:       site.lng,
         distanceMeters:  Math.round(dist),
-        matched, lookupMethod,
-        status: matched ? 'Work Done - Verified' : 'Not Matched',
+        matched,
+        status:          matched ? 'Work Done - Verified' : 'Not Matched',
       });
     }
 
     if (!rowNumber && skippedCount > 0)
-      throw new Error('No valid GPS coordinates found — all rows had 0,0 or blank coordinates');
+      throw new Error('No valid rows found — all rows had blank Site ID or GPS coordinates');
     if (!rowNumber)
       throw new Error('No data rows found in the uploaded file');
 
@@ -454,7 +476,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       fileName:      file.name,
       uploadedBy:    personName,
       createdAt:     new Date().toLocaleDateString('en-IN', {
-        day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit'
+        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
       }),
       matchedCount,
       unmatchedCount,
@@ -465,15 +487,18 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     saveReport(report);
     loadStats();
 
-    msgEl.textContent = `Done — ${rowNumber} rows processed · ${matchedCount} verified (within 500 m of master site) · ${unmatchedCount} not verified${skippedCount ? ` · ${skippedCount} rows skipped (no GPS)` : ''}.`;
-    msgEl.className = 'success';
+    let summary = `Done — ${rowNumber} rows · ${matchedCount} Verified · ${unmatchedCount} Not Verified`;
+    if (notFoundCount)  summary += ` · ${notFoundCount} Site IDs not in master`;
+    if (skippedCount)   summary += ` · ${skippedCount} rows skipped (no GPS)`;
+    msgEl.textContent = summary;
+    msgEl.className   = 'success';
     viewReport(report.id);
   } catch (err) {
     document.getElementById('uploadMsg').textContent = 'Error: ' + err.message;
     document.getElementById('uploadMsg').className   = 'error';
   }
 
-  btn.disabled = false;
+  btn.disabled    = false;
   btn.textContent = 'Upload & Match';
 });
 
@@ -510,6 +535,11 @@ function renderTable(rows) {
     const distCell = r.distanceMeters != null
       ? `<span class="dist-tag${r.matched ? '' : ' dist-far'}">${r.distanceMeters} m</span>`
       : '–';
+    const statusCell = r.status === 'Work Done - Verified'
+      ? `<span class="status-pill pill-green">✔ Work Done, Verified</span>`
+      : r.status === 'Site Not in Master'
+        ? `<span class="status-pill pill-orange">⚠ Site Not in Master</span>`
+        : `<span class="status-pill pill-red">✘ Not Verified</span>`;
     return `
     <tr>
       <td style="color:var(--muted)">${r.rowNumber}</td>
@@ -520,15 +550,12 @@ function renderTable(rows) {
       <td style="font-size:.82rem;color:var(--muted)">${esc(r.circle) || '–'}</td>
       <td class="coords-cell">
         <span class="coord-user">${userCoords}</span>
-        <span class="coord-sep">↕ master</span>
+        <span class="coord-sep">↕ ${esc(r.masterSource || '–')}</span>
         <span class="coord-master">${masterCoords}</span>
       </td>
       <td>${distCell}</td>
       <td style="font-size:.82rem">${esc(r.timeOfVisit) || '–'}</td>
-      <td>${r.matched
-        ? `<span class="status-pill pill-green">✔ Work Done, Verified</span>`
-        : `<span class="status-pill pill-red">✘ Not Verified</span>`
-      }</td>
+      <td>${statusCell}</td>
     </tr>`;
   }).join('');
 }
