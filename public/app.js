@@ -84,20 +84,15 @@ function parsePanIndia(ws) {
   return map;
 }
 
-// ── Parse Site Lat/Long file ───────────────────────────────────────────────
-// Tries sheet "DPR" → "Site master" → first sheet.
-function parseSiteLatLong(wb) {
-  const names = ['DPR', 'Site master', wb.SheetNames[0]];
-  let ws = null;
-  for (const n of names) { if (wb.Sheets[n]) { ws = wb.Sheets[n]; break; } }
-  if (!ws) return new Map();
-
+// ── Parse one sheet from Site Lat/Long file ────────────────────────────────
+function parseLLSheet(ws, map) {
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-  if (rows.length < 2) return new Map();
+  if (rows.length < 2) return;
 
   const headers = rows[0].map(h => String(h || '').trim().toLowerCase().replace(/\r?\n/g, ' '));
   const ci = makeCi(headers);
 
+  // "STS site ID" (DPR / GUJ&MUM) or "STPL Site ID" (Site master)
   const iId   = ci('sts site id', 'stpl site id', 'site id');
   const iName = ci('site name');
   const iCirc = ci('circle name', 'circle');
@@ -106,13 +101,16 @@ function parseSiteLatLong(wb) {
   const iLat  = ci('lat', 'latitude');
   const iLng  = ci('long', 'longitude');
 
-  const map = new Map();
+  if (iId === -1 || iLat === -1 || iLng === -1) return;
+
   for (let i = 1; i < rows.length; i++) {
     const r   = rows[i];
     const id  = String(r[iId] || '').trim();
     const lat = parseFloat(r[iLat]);
     const lng = parseFloat(r[iLng]);
     if (!id || isNaN(lat) || isNaN(lng) || !lat || !lng) continue;
+    // Don't overwrite — first valid entry for an ID wins
+    if (map.has(id.toUpperCase())) continue;
     map.set(id.toUpperCase(), {
       stsId:  id,
       name:   String(r[iName] || '').trim(),
@@ -122,6 +120,19 @@ function parseSiteLatLong(wb) {
       lat, lng,
       source: 'Site Lat/Long',
     });
+  }
+}
+
+// ── Parse Site Lat/Long file — reads ALL sheets ────────────────────────────
+function parseSiteLatLong(wb) {
+  const map = new Map();
+  // Preferred order: Site master has STPL IDs, DPR + GUJ&MUM have STS IDs
+  const order = ['Site master', 'DPR', 'GUJ&MUM', ...wb.SheetNames];
+  const seen  = new Set();
+  for (const name of order) {
+    if (seen.has(name) || !wb.Sheets[name]) continue;
+    seen.add(name);
+    parseLLSheet(wb.Sheets[name], map);
   }
   return map;
 }
