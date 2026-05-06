@@ -320,48 +320,54 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const colTracker = ci('tracker_id', 'tracker', 'device');
     const colPerson  = ci('person', 'name', 'employee', 'user', 'field');
 
-    // ── Auto-detect how lat/lng are stored ────────────────────────────────
-    // Strategy 1: separate columns by header name
+    // ── Extract all valid India lat/lng pairs from any cell value ─────────
+    // Handles: "28.43, 77.31" | "NA" | "28.43,77.31 & 28.50,77.09" |
+    //          "28.63, 77.38-SITE-ID, 28.62, 77.29" | messy mixed text
+    function extractCoords(cellValue) {
+      const str    = String(cellValue || '');
+      const coords = [];
+      const re     = /(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/g;
+      let m;
+      while ((m = re.exec(str)) !== null) {
+        const lat = parseFloat(m[1]);
+        const lng = parseFloat(m[2]);
+        if (lat >= 6 && lat <= 38 && lng >= 60 && lng <= 100) {
+          coords.push({ lat, lng });
+        }
+      }
+      return coords;
+    }
+
+    // ── Detect which column(s) hold coordinates ───────────────────────────
     let colLat = ci('lat', 'latitude');
     let colLng = ci('lng', 'long', 'longitude');
 
-    // Strategy 2: single combined column — scan every column's values
-    // looking for "number, number" or "number number" patterns
+    // If both point to the same column (e.g. "Site Lat-Long"), use combined mode
+    if (colLat !== -1 && colLat === colLng) { colLng = -1; }
+
+    // Separate columns confirmed — but verify they're actually numeric
+    if (colLat !== -1 && colLng !== -1) {
+      const testLat = parseFloat(rows.slice(1, 6).map(r => r[colLat]).find(v => v));
+      const testLng = parseFloat(rows.slice(1, 6).map(r => r[colLng]).find(v => v));
+      if (isNaN(testLat) || isNaN(testLng)) { colLat = -1; colLng = -1; }
+    }
+
+    // Combined column: scan every column for cells that contain "lat, lng" pairs
     let colCombined = -1;
     if (colLat === -1 || colLng === -1) {
-      outer: for (let c = 0; c < headers.length; c++) {
-        for (let r = 1; r < rows.length; r++) {
-          const raw   = String(rows[r][c] || '').trim();
-          const parts = raw.split(/[\s,\/]+/).map(Number).filter(n => !isNaN(n));
-          if (parts.length >= 2) { colCombined = c; break outer; }
+      // First try the column already found by name
+      if (colLat !== -1) colCombined = colLat;
+      else {
+        // Scan all columns for one whose values contain coordinate pairs
+        for (let c = 0; c < headers.length; c++) {
+          const found = rows.slice(1, rows.length).some(r => extractCoords(r[c]).length > 0);
+          if (found) { colCombined = c; break; }
         }
       }
     }
 
-    // Strategy 3: find two numeric columns whose values fall in India lat/lng range
-    if (colLat === -1 && colLng === -1 && colCombined === -1) {
-      const numCols = [];
-      for (let c = 0; c < headers.length; c++) {
-        const sample = rows.slice(1, 6).map(r => parseFloat(r[c])).filter(v => !isNaN(v));
-        if (sample.length) numCols.push({ c, avg: sample.reduce((a,b) => a+b,0)/sample.length });
-      }
-      const latCol = numCols.find(({ avg }) => avg >= 6  && avg <= 38);
-      const lngCol = numCols.find(({ avg }) => avg >= 60 && avg <= 100);
-      if (latCol) colLat = latCol.c;
-      if (lngCol) colLng = lngCol.c;
-    }
-
     if (colLat === -1 && colLng === -1 && colCombined === -1)
       throw new Error('Could not find Lat/Long data. Make sure the file has GPS coordinates.');
-
-    // Extract lat/lng from a single row
-    function getLatLng(r) {
-      if (colLat !== -1 && colLng !== -1) {
-        return { lat: parseFloat(r[colLat]), lng: parseFloat(r[colLng]) };
-      }
-      const parts = String(r[colCombined] || '').trim().split(/[\s,\/]+/).map(Number);
-      return { lat: parts[0], lng: parts[1] };
-    }
 
     // Determine person name
     let personName = document.getElementById('uploadedBy').value.trim() || '';
@@ -382,13 +388,21 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const pings = [];
     let skippedCount = 0;
     for (let i = 1; i < rows.length; i++) {
-      const r          = rows[i];
-      const { lat, lng } = getLatLng(r);
-      if (!lat || !lng || isNaN(lat) || isNaN(lng)) { skippedCount++; continue; }
-      pings.push({
-        lat, lng,
-        time: colTime !== -1 ? String(r[colTime] || '') : '',
-      });
+      const r    = rows[i];
+      const time = colTime !== -1 ? String(r[colTime] || '') : '';
+
+      if (colLat !== -1 && colLng !== -1) {
+        // Separate lat/lng columns
+        const lat = parseFloat(r[colLat]);
+        const lng = parseFloat(r[colLng]);
+        if (!lat || !lng || isNaN(lat) || isNaN(lng)) { skippedCount++; continue; }
+        pings.push({ lat, lng, time });
+      } else {
+        // Combined column — extract all coordinate pairs from the cell
+        const coords = extractCoords(r[colCombined]);
+        if (!coords.length) { skippedCount++; continue; }
+        for (const { lat, lng } of coords) pings.push({ lat, lng, time });
+      }
     }
 
     if (!pings.length) throw new Error('No valid GPS coordinates found in the uploaded file');
