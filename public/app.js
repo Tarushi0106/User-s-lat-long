@@ -316,14 +316,52 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const headers = rows[0].map(h => String(h || '').trim().toLowerCase());
     const ci = makeCi(headers);
 
-    const colLat     = ci('lat', 'latitude');
-    const colLng     = ci('lng', 'long', 'longitude');
     const colTime    = ci('time (gmt', 'time', 'timestamp', 'date');
     const colTracker = ci('tracker_id', 'tracker', 'device');
     const colPerson  = ci('person', 'name', 'employee', 'user', 'field');
 
-    if (colLat === -1 || colLng === -1)
-      throw new Error('Lat / Long columns not found in the uploaded file');
+    // ── Auto-detect how lat/lng are stored ────────────────────────────────
+    // Strategy 1: separate columns by header name
+    let colLat = ci('lat', 'latitude');
+    let colLng = ci('lng', 'long', 'longitude');
+
+    // Strategy 2: single combined column — scan every column's values
+    // looking for "number, number" or "number number" patterns
+    let colCombined = -1;
+    if (colLat === -1 || colLng === -1) {
+      outer: for (let c = 0; c < headers.length; c++) {
+        for (let r = 1; r < rows.length; r++) {
+          const raw   = String(rows[r][c] || '').trim();
+          const parts = raw.split(/[\s,\/]+/).map(Number).filter(n => !isNaN(n));
+          if (parts.length >= 2) { colCombined = c; break outer; }
+        }
+      }
+    }
+
+    // Strategy 3: find two numeric columns whose values fall in India lat/lng range
+    if (colLat === -1 && colLng === -1 && colCombined === -1) {
+      const numCols = [];
+      for (let c = 0; c < headers.length; c++) {
+        const sample = rows.slice(1, 6).map(r => parseFloat(r[c])).filter(v => !isNaN(v));
+        if (sample.length) numCols.push({ c, avg: sample.reduce((a,b) => a+b,0)/sample.length });
+      }
+      const latCol = numCols.find(({ avg }) => avg >= 6  && avg <= 38);
+      const lngCol = numCols.find(({ avg }) => avg >= 60 && avg <= 100);
+      if (latCol) colLat = latCol.c;
+      if (lngCol) colLng = lngCol.c;
+    }
+
+    if (colLat === -1 && colLng === -1 && colCombined === -1)
+      throw new Error('Could not find Lat/Long data. Make sure the file has GPS coordinates.');
+
+    // Extract lat/lng from a single row
+    function getLatLng(r) {
+      if (colLat !== -1 && colLng !== -1) {
+        return { lat: parseFloat(r[colLat]), lng: parseFloat(r[colLng]) };
+      }
+      const parts = String(r[colCombined] || '').trim().split(/[\s,\/]+/).map(Number);
+      return { lat: parts[0], lng: parts[1] };
+    }
 
     // Determine person name
     let personName = document.getElementById('uploadedBy').value.trim() || '';
@@ -344,9 +382,8 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const pings = [];
     let skippedCount = 0;
     for (let i = 1; i < rows.length; i++) {
-      const r   = rows[i];
-      const lat = parseFloat(r[colLat]);
-      const lng = parseFloat(r[colLng]);
+      const r          = rows[i];
+      const { lat, lng } = getLatLng(r);
       if (!lat || !lng || isNaN(lat) || isNaN(lng)) { skippedCount++; continue; }
       pings.push({
         lat, lng,
