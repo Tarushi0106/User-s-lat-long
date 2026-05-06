@@ -353,7 +353,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     }
     if (!personName) personName = 'Unknown';
 
-    const TOLERANCE  = 500; // metres
+    const TOLERANCE  = 50; // metres
     const resultRows = [];
     let matchedCount   = 0;
     let unmatchedCount = 0;
