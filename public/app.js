@@ -224,12 +224,10 @@ async function autoLoadMasters() {
 function loadStats() {
   const reports        = getReports();
   const totalMatched   = reports.reduce((s, r) => s + r.matchedCount,   0);
-  const totalUnmatched = reports.reduce((s, r) => s + r.unmatchedCount, 0);
   document.getElementById('statMasterSites').textContent = masterSites.length || '–';
   document.getElementById('statUploads').textContent     = reports.length;
-  document.getElementById('statRows').textContent        = totalMatched + totalUnmatched;
+  document.getElementById('statRows').textContent        = totalMatched;
   document.getElementById('statMatched').textContent     = totalMatched;
-  document.getElementById('statUnmatched').textContent   = totalUnmatched;
   renderRecentReports(reports.slice(0, 5));
 }
 
@@ -257,8 +255,7 @@ function renderRecentReports(reports) {
         <div class="report-meta">By ${esc(r.uploadedBy)} &nbsp;·&nbsp; ${r.createdAt} &nbsp;·&nbsp; ${r.totalRows} rows</div>
       </div>
       <div class="report-badges">
-        <span class="badge badge-green">✔ ${r.matchedCount} Verified</span>
-        <span class="badge badge-red">✘ ${r.unmatchedCount} Not Verified</span>
+        <span class="badge badge-green">✔ ${r.matchedCount} Sites Verified</span>
       </div>
       <button class="btn-delete" onclick="deleteReport(event,'${r.id}')" title="Delete">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
@@ -373,7 +370,6 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const TOLERANCE  = 50; // metres
     const resultRows = [];
     let matchedCount   = 0;
-    let unmatchedCount = 0;
 
     for (const site of masterSites) {
       let nearestDist = Infinity;
@@ -396,10 +392,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       }
 
       // Skip sites the person never came within 50 m of
-      if (nearestDist > TOLERANCE) {
-        unmatchedCount++;
-        continue;
-      }
+      if (nearestDist > TOLERANCE) continue;
 
       matchedCount++;
       resultRows.push({
@@ -429,7 +422,6 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
         day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
       }),
       matchedCount,
-      unmatchedCount,
       totalRows:     matchedCount,
       rows:          resultRows,
     };
@@ -437,7 +429,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     saveReport(report);
     loadStats();
 
-    let summary = `Done — ${pings.length} GPS pings · ${matchedCount} sites Verified (within 50 m) · ${unmatchedCount} sites Not Visited`;
+    let summary = `Done — ${pings.length} GPS pings processed · ${matchedCount} sites Verified (within 50 m)`;
     if (skippedCount) summary += ` · ${skippedCount} pings skipped (no GPS)`;
     msgEl.textContent = summary;
     msgEl.className   = 'success';
@@ -484,11 +476,7 @@ function renderTable(rows) {
     const distCell = r.distanceMeters != null
       ? `<span class="dist-tag${r.matched ? '' : ' dist-far'}">${r.distanceMeters} m</span>`
       : '–';
-    const statusCell = r.status === 'Work Done - Verified'
-      ? `<span class="status-pill pill-green">✔ Work Done, Verified</span>`
-      : r.status === 'Site Not in Master'
-        ? `<span class="status-pill pill-orange">⚠ Site Not in Master</span>`
-        : `<span class="status-pill pill-red">✘ Not Verified</span>`;
+    const statusCell = `<span class="status-pill pill-green">✔ Work Done, Verified</span>`;
     return `
     <tr>
       <td style="color:var(--muted)">${r.rowNumber}</td>
