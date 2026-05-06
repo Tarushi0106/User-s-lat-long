@@ -295,11 +295,11 @@ document.getElementById('fileInput').addEventListener('change', function () {
 });
 
 // ── Upload & Match ─────────────────────────────────────────────────────────
-// For each row in the uploaded file:
-//   1. Get the person's Lat/Long.
-//   2. Find the nearest master site (from PAN India + Site Lat/Long) by GPS.
-//   3. If nearest site is ≤ 500 m → Work Done, Verified.
-//      If nearest site is > 500 m → Not Verified.
+// 1. Read ALL GPS pings from the uploaded file into memory.
+// 2. For each master site, find the single nearest ping.
+// 3. If that nearest ping is ≤ 50 m → Work Done, Verified.
+//    Otherwise → Not Verified.
+// Result: one row per master site (not one row per GPS ping).
 document.getElementById('uploadForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('fileInput').files[0];
@@ -353,64 +353,93 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     }
     if (!personName) personName = 'Unknown';
 
+    // ── Step 1: Collect ALL valid GPS pings from the uploaded file ─────────
+    const pings = [];
+    let skippedCount = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const r   = rows[i];
+      const lat = parseFloat(r[colLat]);
+      const lng = parseFloat(r[colLng]);
+      if (!lat || !lng || isNaN(lat) || isNaN(lng)) { skippedCount++; continue; }
+      pings.push({
+        lat, lng,
+        time: colTime !== -1 ? String(r[colTime] || '') : '',
+      });
+    }
+
+    if (!pings.length) throw new Error('No valid GPS coordinates found in the uploaded file');
+
+    // ── Step 2: For each master site, find the single nearest ping ─────────
     const TOLERANCE  = 50; // metres
     const resultRows = [];
     let matchedCount   = 0;
     let unmatchedCount = 0;
-    let skippedCount   = 0;
     let rowNumber      = 0;
 
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i];
+    for (const site of masterSites) {
+      let nearestDist = Infinity;
+      let nearestTime = '';
+      let nearestLat  = null;
+      let nearestLng  = null;
+      const degTol = TOLERANCE / 111000;
 
-      const userLat = parseFloat(r[colLat]);
-      const userLng = parseFloat(r[colLng]);
-      if (!userLat || !userLng || isNaN(userLat) || isNaN(userLng)) {
-        skippedCount++;
+      for (const ping of pings) {
+        // Quick bounding-box pre-filter before expensive haversine
+        if (Math.abs(ping.lat - site.lat) > degTol) continue;
+        if (Math.abs(ping.lng - site.lng) > degTol) continue;
+        const d = haversineMeters(ping.lat, ping.lng, site.lat, site.lng);
+        if (d < nearestDist) {
+          nearestDist = d;
+          nearestTime = ping.time;
+          nearestLat  = ping.lat;
+          nearestLng  = ping.lng;
+        }
+      }
+
+      // Only include this site if the nearest ping is within 50 m
+      if (nearestDist > TOLERANCE) {
+        unmatchedCount++;
+        rowNumber++;
+        resultRows.push({
+          rowNumber,
+          personName,
+          timeOfVisit:     '',
+          userLat:         null,
+          userLng:         null,
+          matchedSiteId:   site.stsId,
+          matchedSiteName: site.name,
+          district:        site.dist,
+          circle:          site.circle,
+          masterSource:    site.source,
+          masterLat:       site.lat,
+          masterLng:       site.lng,
+          distanceMeters:  null,
+          matched:         false,
+          status:          'Not Matched',
+        });
         continue;
       }
 
-      const timeOfRow = colTime !== -1 ? String(r[colTime] || '') : '';
+      matchedCount++;
       rowNumber++;
-
-      // Find the nearest master site by GPS
-      let nearestSite = null;
-      let nearestDist = Infinity;
-      const degTol = TOLERANCE / 111000;
-
-      for (const site of masterSites) {
-        if (Math.abs(userLat - site.lat) > degTol) continue;
-        if (Math.abs(userLng - site.lng) > degTol) continue;
-        const d = haversineMeters(userLat, userLng, site.lat, site.lng);
-        if (d < nearestDist) { nearestDist = d; nearestSite = site; }
-      }
-
-      const matched = nearestSite !== null && nearestDist <= TOLERANCE;
-      if (matched) matchedCount++;
-      else         unmatchedCount++;
-
       resultRows.push({
         rowNumber,
         personName,
-        timeOfVisit:     timeOfRow,
-        userLat, userLng,
-        matchedSiteId:   nearestSite ? nearestSite.stsId  : '–',
-        matchedSiteName: nearestSite ? nearestSite.name   : '–',
-        district:        nearestSite ? nearestSite.dist   : '–',
-        circle:          nearestSite ? nearestSite.circle : '–',
-        masterSource:    nearestSite ? nearestSite.source : '–',
-        masterLat:       nearestSite ? nearestSite.lat    : null,
-        masterLng:       nearestSite ? nearestSite.lng    : null,
-        distanceMeters:  nearestSite ? Math.round(nearestDist) : null,
-        matched,
-        status: matched ? 'Work Done - Verified' : 'Not Matched',
+        timeOfVisit:     nearestTime,
+        userLat:         nearestLat,
+        userLng:         nearestLng,
+        matchedSiteId:   site.stsId,
+        matchedSiteName: site.name,
+        district:        site.dist,
+        circle:          site.circle,
+        masterSource:    site.source,
+        masterLat:       site.lat,
+        masterLng:       site.lng,
+        distanceMeters:  Math.round(nearestDist),
+        matched:         true,
+        status:          'Work Done - Verified',
       });
     }
-
-    if (!rowNumber && skippedCount > 0)
-      throw new Error('No valid GPS rows found — all rows had 0,0 or blank coordinates');
-    if (!rowNumber)
-      throw new Error('No data rows found in the uploaded file');
 
     const report = {
       id:            Date.now().toString(),
@@ -428,8 +457,8 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     saveReport(report);
     loadStats();
 
-    let summary = `Done — ${rowNumber} rows · ${matchedCount} Verified · ${unmatchedCount} Not Verified`;
-    if (skippedCount) summary += ` · ${skippedCount} rows skipped (no GPS)`;
+    let summary = `Done — ${pings.length} GPS pings · ${matchedCount} sites Verified (within 50 m) · ${unmatchedCount} sites Not Visited`;
+    if (skippedCount) summary += ` · ${skippedCount} pings skipped (no GPS)`;
     msgEl.textContent = summary;
     msgEl.className   = 'success';
     viewReport(report.id);
