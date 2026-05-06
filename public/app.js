@@ -374,7 +374,6 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const resultRows = [];
     let matchedCount   = 0;
     let unmatchedCount = 0;
-    let rowNumber      = 0;
 
     for (const site of masterSites) {
       let nearestDist = Infinity;
@@ -396,34 +395,15 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
         }
       }
 
-      // Only include this site if the nearest ping is within 50 m
+      // Skip sites the person never came within 50 m of
       if (nearestDist > TOLERANCE) {
         unmatchedCount++;
-        rowNumber++;
-        resultRows.push({
-          rowNumber,
-          personName,
-          timeOfVisit:     '',
-          userLat:         null,
-          userLng:         null,
-          matchedSiteId:   site.stsId,
-          matchedSiteName: site.name,
-          district:        site.dist,
-          circle:          site.circle,
-          masterSource:    site.source,
-          masterLat:       site.lat,
-          masterLng:       site.lng,
-          distanceMeters:  null,
-          matched:         false,
-          status:          'Not Matched',
-        });
         continue;
       }
 
       matchedCount++;
-      rowNumber++;
       resultRows.push({
-        rowNumber,
+        rowNumber: matchedCount,
         personName,
         timeOfVisit:     nearestTime,
         userLat:         nearestLat,
