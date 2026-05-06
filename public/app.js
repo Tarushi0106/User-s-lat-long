@@ -430,7 +430,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       }),
       matchedCount,
       unmatchedCount,
-      totalRows:     rowNumber,
+      totalRows:     matchedCount,
       rows:          resultRows,
     };
 
