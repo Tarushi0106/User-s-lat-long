@@ -90,54 +90,6 @@ main {
   padding: 28px 24px;
 }
 
-/* ── STAT CARDS ── */
-.cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
-}
-.card {
-  background: var(--white);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  box-shadow: var(--shadow);
-}
-.card-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: var(--radius);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.card-icon.blue   { background: var(--blue-bg);   color: var(--blue);   }
-.card-icon.gray   { background: var(--gray-bg);  color: var(--gray);   }
-.card-icon.green  { background: var(--green-bg); color: var(--green);  }
-.card-icon.red    { background: var(--red-bg);   color: var(--red);    }
-.card-icon.purple { background: var(--purple-bg); color: var(--purple); }
-.card-label {
-  font-size: .75rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: .05em;
-  font-weight: 500;
-  margin-bottom: 4px;
-}
-.card-value {
-  font-size: 1.9rem;
-  font-weight: 700;
-  color: var(--text);
-  line-height: 1;
-}
-.card-value.green  { color: var(--green);  }
-.card-value.red    { color: var(--red);    }
-.card-value.purple { color: var(--purple); }
 
 /* ── PANEL ── */
 .panel {

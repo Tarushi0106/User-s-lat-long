@@ -155,11 +155,7 @@ function buildMergedArray() {
 
 // ── Update header pill ─────────────────────────────────────────────────────
 function updateMasterStatus() {
-  const pill   = document.getElementById('headerMasterPill');
-  const statEl = document.getElementById('statMasterSites');
-
-  statEl.textContent = masterSites.length || '–';
-
+  const pill = document.getElementById('headerMasterPill');
   if (masterSites.length) {
     pill.textContent = `✔ ${masterSites.length} Sites Loaded`;
     pill.className   = 'master-pill loaded';
@@ -222,13 +218,7 @@ async function autoLoadMasters() {
 
 // ── Stats ──────────────────────────────────────────────────────────────────
 function loadStats() {
-  const reports        = getReports();
-  const totalMatched   = reports.reduce((s, r) => s + r.matchedCount,   0);
-  document.getElementById('statMasterSites').textContent = masterSites.length || '–';
-  document.getElementById('statUploads').textContent     = reports.length;
-  document.getElementById('statRows').textContent        = totalMatched;
-  document.getElementById('statMatched').textContent     = totalMatched;
-  renderRecentReports(reports.slice(0, 5));
+  renderRecentReports(getReports().slice(0, 5));
 }
 
 // ── Reports ────────────────────────────────────────────────────────────────
