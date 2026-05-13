@@ -306,173 +306,280 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
   msgEl.className   = '';
 
   try {
-    const buf  = await file.arrayBuffer();
-    const wb   = XLSX.read(new Uint8Array(buf), { type: 'array' });
-    const ws   = wb.Sheets[wb.SheetNames[0]];
+    const buf = await file.arrayBuffer();
+    const wb  = XLSX.read(new Uint8Array(buf), { type: 'array' });
+
+    // Pick the sheet that actually contains India GPS coordinates.
+    // Files like productivity reports have a summary/pivot sheet first;
+    // the real data (with lat/long) is in a later sheet.
+    const _gpsRe = /(\d{1,3}\.\d+)\s*,\s*(\d{1,3}\.\d+)/;
+    function sheetHasCoords(s) {
+      const sample = XLSX.utils.sheet_to_json(s, { header: 1, defval: '' }).slice(0, 60);
+      return sample.some(row => row.some(cell => {
+        const m = _gpsRe.exec(String(cell || ''));
+        if (!m) return false;
+        const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+        return lat >= 6 && lat <= 38 && lng >= 60 && lng <= 100;
+      }));
+    }
+    let ws = wb.Sheets[wb.SheetNames[0]];
+    for (const name of wb.SheetNames) {
+      if (sheetHasCoords(wb.Sheets[name])) { ws = wb.Sheets[name]; break; }
+    }
+
     const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
 
     if (rows.length < 2) throw new Error('File has no data rows');
 
-    const headers = rows[0].map(h => String(h || '').trim().toLowerCase());
+    // Auto-detect the real header row — skip title / merged / blank rows at top.
+    // A real header row has ≥ 3 non-empty cells AND ≥ 2 of them match known column keywords.
+    const HDR_KEYWORDS = ['lat', 'long', 'lng', 'gps', 'coordinate', 'location',
+                          'name', 'employee', 'person', 'staff', 'date', 'time',
+                          'timestamp', 'id', 'site', 'status', 'tracker', 'device'];
+    let headerRowIdx = 0;
+    for (let r = 0; r < Math.min(rows.length, 8); r++) {
+      const cells    = rows[r].map(c => String(c || '').trim().toLowerCase());
+      const nonEmpty = cells.filter(Boolean).length;
+      const kwHits   = cells.filter(c => HDR_KEYWORDS.some(k => c.includes(k))).length;
+      if (nonEmpty >= 3 && kwHits >= 2) { headerRowIdx = r; break; }
+    }
+
+    const headers = rows[headerRowIdx].map(h => String(h || '').trim().toLowerCase());
     const ci = makeCi(headers);
 
     const colTime    = ci('time (gmt', 'time', 'timestamp', 'date');
     const colTracker = ci('tracker_id', 'tracker', 'device');
-    const colPerson  = ci('person', 'name', 'employee', 'user', 'field');
+    const colPerson  = ci('full name', 'employee name', 'staff name', 'person name',
+                          'field person', 'person', 'name', 'employee', 'user', 'field', 'engineer');
 
     // ── Extract all valid India lat/lng pairs from any cell value ─────────
-    // Handles: "28.43, 77.31" | "NA" | "28.43,77.31 & 28.50,77.09" |
-    //          "28.63, 77.38-SITE-ID, 28.62, 77.29" | messy mixed text
+    // Handles comma-separated:  "28.43, 77.31"  |  "28.43,77.31"
+    //         space-separated:  "19.082862 72.851958"
+    //         multiple pairs:   "28.43,77.31 & 28.50,77.09"
+    //         mixed text:       "28.63,77.38-SITE-ID, 28.62,77.29"
     function extractCoords(cellValue) {
-      const str    = String(cellValue || '');
+      const str    = String(cellValue == null ? '' : cellValue);
       const coords = [];
-      const re     = /(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/g;
-      let m;
-      while ((m = re.exec(str)) !== null) {
-        const lat = parseFloat(m[1]);
-        const lng = parseFloat(m[2]);
-        if (lat >= 6 && lat <= 38 && lng >= 60 && lng <= 100) {
-          coords.push({ lat, lng });
+      // Pass 1: comma-separated (permissive decimal)
+      const re1 = /(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/g;
+      // Pass 2: space-separated (require ≥4 decimal places to avoid false positives)
+      const re2 = /(-?\d{1,3}\.\d{4,})\s+(-?\d{2,3}\.\d{4,})/g;
+      for (const re of [re1, re2]) {
+        let m;
+        while ((m = re.exec(str)) !== null) {
+          const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+          if (lat >= 6 && lat <= 38 && lng >= 60 && lng <= 100)
+            coords.push({ lat, lng });
         }
       }
       return coords;
     }
 
     // ── Detect which column(s) hold coordinates ───────────────────────────
-    let colLat = ci('lat', 'latitude');
-    let colLng = ci('lng', 'long', 'longitude');
-
-    // If both point to the same column (e.g. "Site Lat-Long"), use combined mode
-    if (colLat !== -1 && colLat === colLng) { colLng = -1; }
-
-    // Separate columns confirmed — but verify they're actually numeric
-    if (colLat !== -1 && colLng !== -1) {
-      const testLat = parseFloat(rows.slice(1, 6).map(r => r[colLat]).find(v => v));
-      const testLng = parseFloat(rows.slice(1, 6).map(r => r[colLng]).find(v => v));
-      if (isNaN(testLat) || isNaN(testLng)) { colLat = -1; colLng = -1; }
-    }
-
-    // Combined column: scan every column for cells that contain "lat, lng" pairs
+    // Strategy 1: named separate lat / lng columns (must be distinct and numeric)
+    let colLat = ci('latitude', 'lat');
+    let colLng = ci('longitude', 'lon', 'long', 'lng');
     let colCombined = -1;
+
+    if (colLat !== -1 && colLng !== -1 && colLat !== colLng) {
+      const samp = rows.slice(headerRowIdx + 1, Math.min(rows.length, headerRowIdx + 11));
+      const tLat = parseFloat(String(samp.map(r => r[colLat]).find(v => String(v || '').trim()) || ''));
+      const tLng = parseFloat(String(samp.map(r => r[colLng]).find(v => String(v || '').trim()) || ''));
+      if (isNaN(tLat) || isNaN(tLng) || tLat < 6 || tLat > 38 || tLng < 60 || tLng > 100) {
+        colLat = -1; colLng = -1;
+      }
+    } else {
+      colLat = -1; colLng = -1; // same column or both missing → fall through to combined scan
+    }
+
+    // Strategy 2: scan every column and pick whichever has the most valid coord pairs.
+    // This handles combined "lat,lng" cells, non-standard headers, merged cells, etc.
     if (colLat === -1 || colLng === -1) {
-      // First try the column already found by name
-      if (colLat !== -1) colCombined = colLat;
-      else {
-        // Scan all columns for one whose values contain coordinate pairs
-        for (let c = 0; c < headers.length; c++) {
-          const found = rows.slice(1, rows.length).some(r => extractCoords(r[c]).length > 0);
-          if (found) { colCombined = c; break; }
+      const numCols   = rows[headerRowIdx] ? rows[headerRowIdx].length : 0;
+      const scanStart = headerRowIdx + 1;
+      const scanLimit = Math.min(rows.length, scanStart + 200);
+      let bestCount = 0;
+      for (let c = 0; c < numCols; c++) {
+        let count = 0;
+        for (let i = scanStart; i < scanLimit; i++) {
+          if (rows[i] && extractCoords(rows[i][c]).length > 0) count++;
         }
+        if (count > bestCount) { bestCount = count; colCombined = c; }
       }
     }
 
-    if (colLat === -1 && colLng === -1 && colCombined === -1)
-      throw new Error('Could not find Lat/Long data. Make sure the file has GPS coordinates.');
-
-    // Determine person name
-    let personName = document.getElementById('uploadedBy').value.trim() || '';
-    if (!personName) {
-      for (let i = 1; i < rows.length; i++) {
-        if (colPerson !== -1 && rows[i][colPerson]) {
-          personName = String(rows[i][colPerson]).trim(); break;
-        }
-        if (colTracker !== -1 && rows[i][colTracker]) {
-          const raw = String(rows[i][colTracker]).trim();
-          personName = raw.includes('@') ? raw.split('@')[1] : raw; break;
-        }
-      }
-    }
-    if (!personName) personName = 'Unknown';
-
-    // ── Step 1: Collect ALL valid GPS pings from the uploaded file ─────────
-    const pings = [];
-    let skippedCount = 0;
-    for (let i = 1; i < rows.length; i++) {
-      const r    = rows[i];
-      const time = colTime !== -1 ? String(r[colTime] || '') : '';
-
-      if (colLat !== -1 && colLng !== -1) {
-        // Separate lat/lng columns
-        const lat = parseFloat(r[colLat]);
-        const lng = parseFloat(r[colLng]);
-        if (!lat || !lng || isNaN(lat) || isNaN(lng)) { skippedCount++; continue; }
-        pings.push({ lat, lng, time });
-      } else {
-        // Combined column — extract all coordinate pairs from the cell
-        const coords = extractCoords(r[colCombined]);
-        if (!coords.length) { skippedCount++; continue; }
-        for (const { lat, lng } of coords) pings.push({ lat, lng, time });
-      }
+    if (colLat === -1 && colLng === -1 && colCombined === -1) {
+      const preview = headers.slice(0, 10).filter(Boolean).join(' | ');
+      throw new Error(`Could not find GPS coordinates. Columns detected: ${preview || '(none)'}`);
     }
 
-    if (!pings.length) throw new Error('No valid GPS coordinates found in the uploaded file');
+    // ── Detect file mode ──────────────────────────────────────────────────
+    // Productivity report: one summary row per employee (show ALL rows + status).
+    // GPS tracker: many pings per person (show only verified site visits).
+    const manualName   = document.getElementById('uploadedBy').value.trim();
+    const allDataRows  = rows.slice(headerRowIdx + 1).filter(r => r.some(c => String(c || '').trim()));
+    const nameSet      = new Set();
+    if (colPerson !== -1)
+      allDataRows.forEach(r => { const n = String(r[colPerson] || '').trim(); if (n) nameSet.add(n); });
+    // Productivity mode: >1 unique person AND ≥40 % of rows are unique persons
+    const isProductivityReport = nameSet.size > 1 && nameSet.size / allDataRows.length >= 0.4;
 
-    // ── Step 2: For each master site, find the single nearest ping ─────────
     const TOLERANCE  = 50; // metres
     const resultRows = [];
-    let matchedCount   = 0;
+    let matchedCount = 0;
+    let reportLabel  = '';
+    let summary      = '';
 
-    for (const site of masterSites) {
-      let nearestDist = Infinity;
-      let nearestTime = '';
-      let nearestLat  = null;
-      let nearestLng  = null;
-      const degTol = TOLERANCE / 111000;
+    if (isProductivityReport) {
+      // ── PRODUCTIVITY REPORT: one row per employee ─────────────────────────
+      // Show every employee — Verified | Not at Master Site | Leave/WFH/etc.
+      const colRemark = ci('validated remark', 'remark', 'validated', 'attendance', 'status');
 
-      for (const ping of pings) {
-        // Quick bounding-box pre-filter before expensive haversine
-        if (Math.abs(ping.lat - site.lat) > degTol) continue;
-        if (Math.abs(ping.lng - site.lng) > degTol) continue;
-        const d = haversineMeters(ping.lat, ping.lng, site.lat, site.lng);
-        if (d < nearestDist) {
-          nearestDist = d;
-          nearestTime = ping.time;
-          nearestLat  = ping.lat;
-          nearestLng  = ping.lng;
+      for (let i = headerRowIdx + 1; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r.some(c => String(c || '').trim())) continue;
+
+        const personName = (colPerson !== -1 ? String(r[colPerson] || '').trim() : '')
+          || manualName || 'Unknown';
+        const fileStatus = colRemark !== -1 ? String(r[colRemark] || '').trim() : '';
+
+        // Get this row's GPS coordinates
+        let rowLat = null, rowLng = null;
+        if (colLat !== -1 && colLng !== -1) {
+          const la = parseFloat(r[colLat]), lo = parseFloat(r[colLng]);
+          if (!isNaN(la) && !isNaN(lo) && la && lo) { rowLat = la; rowLng = lo; }
+        } else if (colCombined !== -1) {
+          const coords = extractCoords(r[colCombined]);
+          if (coords.length) { rowLat = coords[0].lat; rowLng = coords[0].lng; }
+        }
+
+        // Find nearest master site (no 50 m cap — always show nearest for context)
+        let nearestSite = null, nearestDist = Infinity;
+        if (rowLat !== null) {
+          for (const site of masterSites) {
+            const d = haversineMeters(rowLat, rowLng, site.lat, site.lng);
+            if (d < nearestDist) { nearestDist = d; nearestSite = site; }
+          }
+        }
+
+        const verified = nearestDist <= TOLERANCE;
+        if (verified) matchedCount++;
+        const status = rowLat === null
+          ? (fileStatus || 'No GPS')
+          : (verified ? 'Work Done - Verified' : 'Not at Master Site');
+
+        resultRows.push({
+          rowNumber:       resultRows.length + 1,
+          personName,
+          timeOfVisit:     '',
+          userLat:         rowLat,
+          userLng:         rowLng,
+          matchedSiteId:   nearestSite?.stsId   || '',
+          matchedSiteName: nearestSite?.name    || '',
+          district:        nearestSite?.dist    || '',
+          circle:          nearestSite?.circle  || '',
+          masterSource:    nearestSite?.source  || '',
+          masterLat:       nearestSite?.lat     ?? null,
+          masterLng:       nearestSite?.lng     ?? null,
+          distanceMeters:  nearestDist !== Infinity ? Math.round(nearestDist) : null,
+          matched:         verified,
+          status,
+        });
+      }
+
+      reportLabel = `${nameSet.size} persons`;
+      summary     = `Done — ${resultRows.length} employees · ${matchedCount} Verified · ${resultRows.length - matchedCount} other`;
+
+    } else {
+      // ── GPS TRACKER: many pings per person → show only verified site visits ─
+      const pingsByPerson = new Map();
+      let skippedCount = 0;
+
+      for (let i = headerRowIdx + 1; i < rows.length; i++) {
+        const r    = rows[i];
+        const time = colTime !== -1 ? String(r[colTime] || '') : '';
+
+        let rowPerson = manualName;
+        if (!rowPerson) {
+          if (colPerson !== -1 && String(r[colPerson] || '').trim())
+            rowPerson = String(r[colPerson]).trim();
+          else if (colTracker !== -1 && String(r[colTracker] || '').trim()) {
+            const raw = String(r[colTracker]).trim();
+            rowPerson = raw.includes('@') ? raw.split('@')[1] : raw;
+          }
+        }
+        if (!rowPerson) rowPerson = 'Unknown';
+
+        if (!pingsByPerson.has(rowPerson)) pingsByPerson.set(rowPerson, []);
+        const bucket = pingsByPerson.get(rowPerson);
+
+        if (colLat !== -1 && colLng !== -1) {
+          const lat = parseFloat(r[colLat]), lng = parseFloat(r[colLng]);
+          if (!lat || !lng || isNaN(lat) || isNaN(lng)) { skippedCount++; continue; }
+          bucket.push({ lat, lng, time });
+        } else {
+          const coords = extractCoords(r[colCombined]);
+          if (!coords.length) { skippedCount++; continue; }
+          for (const { lat, lng } of coords) bucket.push({ lat, lng, time });
         }
       }
 
-      // Skip sites the person never came within 50 m of
-      if (nearestDist > TOLERANCE) continue;
+      const totalPings = [...pingsByPerson.values()].reduce((s, a) => s + a.length, 0);
+      if (!totalPings) throw new Error('No valid GPS coordinates found in the uploaded file');
 
-      matchedCount++;
-      resultRows.push({
-        rowNumber: matchedCount,
-        personName,
-        timeOfVisit:     nearestTime,
-        userLat:         nearestLat,
-        userLng:         nearestLng,
-        matchedSiteId:   site.stsId,
-        matchedSiteName: site.name,
-        district:        site.dist,
-        circle:          site.circle,
-        masterSource:    site.source,
-        masterLat:       site.lat,
-        masterLng:       site.lng,
-        distanceMeters:  Math.round(nearestDist),
-        matched:         true,
-        status:          'Work Done - Verified',
-      });
+      for (const [personName, pings] of pingsByPerson) {
+        for (const site of masterSites) {
+          let nearestDist = Infinity, nearestTime = '', nearestLat = null, nearestLng = null;
+          const degTol = TOLERANCE / 111000;
+          for (const ping of pings) {
+            if (Math.abs(ping.lat - site.lat) > degTol) continue;
+            if (Math.abs(ping.lng - site.lng) > degTol) continue;
+            const d = haversineMeters(ping.lat, ping.lng, site.lat, site.lng);
+            if (d < nearestDist) { nearestDist = d; nearestTime = ping.time; nearestLat = ping.lat; nearestLng = ping.lng; }
+          }
+          if (nearestDist > TOLERANCE) continue;
+          matchedCount++;
+          resultRows.push({
+            rowNumber:       matchedCount,
+            personName,
+            timeOfVisit:     nearestTime,
+            userLat:         nearestLat,
+            userLng:         nearestLng,
+            matchedSiteId:   site.stsId,
+            matchedSiteName: site.name,
+            district:        site.dist,
+            circle:          site.circle,
+            masterSource:    site.source,
+            masterLat:       site.lat,
+            masterLng:       site.lng,
+            distanceMeters:  Math.round(nearestDist),
+            matched:         true,
+            status:          'Work Done - Verified',
+          });
+        }
+      }
+
+      const personCount = pingsByPerson.size;
+      reportLabel = personCount > 1 ? `${personCount} persons` : ([...pingsByPerson.keys()][0] || 'Unknown');
+      summary = `Done — ${totalPings} GPS pings · ${personCount > 1 ? personCount + ' persons · ' : ''}${matchedCount} sites Verified (within 50 m)`;
+      if (skippedCount) summary += ` · ${skippedCount} rows skipped`;
     }
-
     const report = {
-      id:            Date.now().toString(),
-      fileName:      file.name,
-      uploadedBy:    personName,
-      createdAt:     new Date().toLocaleDateString('en-IN', {
+      id:         Date.now().toString(),
+      fileName:   file.name,
+      uploadedBy: reportLabel,
+      createdAt:  new Date().toLocaleDateString('en-IN', {
         day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
       }),
       matchedCount,
-      totalRows:     matchedCount,
-      rows:          resultRows,
+      totalRows:  resultRows.length,
+      rows:       resultRows,
     };
 
     saveReport(report);
     loadStats();
 
-    let summary = `Done — ${pings.length} GPS pings processed · ${matchedCount} sites Verified (within 50 m)`;
-    if (skippedCount) summary += ` · ${skippedCount} pings skipped (no GPS)`;
-    msgEl.textContent = summary;
+    msgEl.innerHTML = `${summary} &nbsp;<button onclick="downloadCurrentReport()" style="margin-left:8px;padding:4px 12px;background:#15803d;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">&#8595; Download Excel</button>`;
     msgEl.className   = 'success';
     viewReport(report.id);
   } catch (err) {
@@ -514,10 +621,19 @@ function renderTable(rows) {
     const masterCoords = r.masterLat != null
       ? `${r.masterLat.toFixed(5)}, ${r.masterLng.toFixed(5)}`
       : '–';
-    const distCell = r.distanceMeters != null
-      ? `<span class="dist-tag${r.matched ? '' : ' dist-far'}">${r.distanceMeters} m</span>`
+    const distFmt  = r.distanceMeters != null
+      ? (r.distanceMeters < 1000 ? r.distanceMeters + ' m' : (r.distanceMeters / 1000).toFixed(1) + ' km')
+      : null;
+    const distCell = distFmt
+      ? `<span class="dist-tag${r.matched ? '' : ' dist-far'}">${distFmt}</span>`
       : '–';
-    const statusCell = `<span class="status-pill pill-green">✔ Work Done, Verified</span>`;
+    let statusCell;
+    if (r.status === 'Work Done - Verified')
+      statusCell = `<span class="status-pill pill-green">✔ Work Done, Verified</span>`;
+    else if (r.status === 'Not at Master Site')
+      statusCell = `<span class="status-pill pill-orange">✗ Not at Site</span>`;
+    else
+      statusCell = `<span class="status-pill" style="background:var(--gray-bg);color:var(--gray)">${esc(r.status)}</span>`;
     return `
     <tr>
       <td style="color:var(--muted)">${r.rowNumber}</td>
@@ -532,13 +648,69 @@ function renderTable(rows) {
         <span class="coord-master">${masterCoords}</span>
       </td>
       <td>${distCell}</td>
-      <td style="font-size:.82rem">${esc(r.timeOfVisit) || '–'}</td>
+      <td style="font-size:.82rem">${fmtTime(r.timeOfVisit)}</td>
       <td>${statusCell}</td>
     </tr>`;
   }).join('');
 }
 
+// ── Download current report as Excel ──────────────────────────────────────
+function downloadCurrentReport() {
+  if (!currentRows.length) return;
+  const title  = document.getElementById('reportTitle').textContent;
+  const colHdr = ['#', 'Person Name', 'Site ID', 'Site Name (Master)', 'District', 'Circle',
+                  'Person GPS', 'Master GPS', 'Distance (m)', 'Time', 'Status'];
+  const data = currentRows.map(r => [
+    r.rowNumber,
+    r.personName        || '',
+    r.matchedSiteId     || '',
+    r.matchedSiteName   || '',
+    r.district          || '',
+    r.circle            || '',
+    r.userLat   != null ? `${r.userLat.toFixed(6)}, ${r.userLng.toFixed(6)}`     : '',
+    r.masterLat != null ? `${r.masterLat.toFixed(6)}, ${r.masterLng.toFixed(6)}` : '',
+    r.distanceMeters != null ? r.distanceMeters : '',
+    fmtTime(r.timeOfVisit),
+    r.status      || '',
+  ]);
+
+  const ws = XLSX.utils.aoa_to_sheet([colHdr, ...data]);
+
+  // Column widths
+  ws['!cols'] = [
+    { wch: 5 }, { wch: 22 }, { wch: 22 }, { wch: 28 },
+    { wch: 18 }, { wch: 14 }, { wch: 26 }, { wch: 26 },
+    { wch: 13 }, { wch: 18 }, { wch: 22 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Verification');
+  const safeName = title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
+  XLSX.writeFile(wb, safeName + '.xlsx');
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
+const _MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtTime(val) {
+  if (!val && val !== 0) return '–';
+  const s = String(val).trim();
+  if (!s) return '–';
+  let d;
+  if (/^\d{9,13}$/.test(s)) {
+    // Unix timestamp: 10 digits = seconds, 13 digits = milliseconds
+    const ms = s.length <= 10 ? Number(s) * 1000 : Number(s);
+    d = new Date(ms);
+  } else {
+    d = new Date(s);
+  }
+  if (isNaN(d.getTime())) return s;
+  const dd  = String(d.getDate()).padStart(2, '0');
+  const mon = _MONTHS[d.getMonth()];
+  const hh  = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const sec = String(d.getSeconds()).padStart(2, '0');
+  return `${dd} ${mon} ${hh}:${min}:${sec}`;
+}
 function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

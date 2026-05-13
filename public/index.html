@@ -75,7 +75,13 @@
     <section class="panel" id="reportDetail" style="display:none;">
       <div class="panel-header">
         <h2 id="reportTitle">Report Detail</h2>
-        <button class="btn btn-ghost" id="closeDetail">Close</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-outline" id="downloadBtn" onclick="downloadCurrentReport()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download Excel
+          </button>
+          <button class="btn btn-ghost" id="closeDetail">Close</button>
+        </div>
       </div>
       <div class="filter-row">
         <div class="search-box">
@@ -85,6 +91,7 @@
         <select id="statusFilter">
           <option value="">All Statuses</option>
           <option value="Work Done - Verified">Work Done, Verified</option>
+          <option value="Not at Master Site">Not at Master Site</option>
         </select>
         <span class="row-count" id="resultCount"></span>
       </div>
@@ -99,7 +106,7 @@
               <th>District</th>
               <th>Circle</th>
               <th>Person GPS → Master GPS</th>
-              <th>Distance</th>
+              <th>Gap to Site</th>
               <th>Time</th>
               <th>Status</th>
             </tr>
